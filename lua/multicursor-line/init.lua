@@ -50,11 +50,27 @@ local function get_backend()
     return "vm"
 end
 
+---Clean up temporary submode keymaps
+---@param bufnr? integer
+function M.cleanup_submode(bufnr)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
+    if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+    end
+
+    local keys = { "i", "a", "c", "s", "<Esc>" }
+    for _, k in ipairs(keys) do
+        pcall(vim.keymap.del, "n", k, { buffer = bufnr })
+    end
+end
+
 ---Clear active cursors
 function M.clear()
+    M.cleanup_submode()
     local b = get_backend()
     if b == "vm" then
         if vim.b.visual_multi == 1 then
+            pcall(vim.cmd, "call b:VM_Selection.Edit.extra_spaces.remove()")
             pcall(vim.fn["vm#reset"])
         end
     else
@@ -65,74 +81,23 @@ function M.clear()
     end
 end
 
----Calculate column for a line
+---Check if line is tail or head in current mode
 ---@param mode McLineMode
----@param line_nr integer 1-indexed
----@param line_index integer 1-indexed (position in selection: 1, 2, 3...)
----@param is_block? boolean
----@param s_col? integer 0-indexed block start col
----@param e_col? integer 0-indexed block end col
----@return integer col_0_indexed 0-indexed column
-function M.get_col(mode, line_nr, line_index, is_block, s_col, e_col)
-    local line_str = vim.api.nvim_buf_get_lines(0, line_nr - 1, line_nr, true)[1] or ""
-    local max_col = math.max(0, #line_str - 1)
-
-    if is_block and s_col and e_col then
-        local left = math.min(s_col, max_col)
-        local right = math.min(e_col, max_col)
-        if mode == "head" then
-            return left
-        elseif mode == "tail" then
-            return right
-        elseif mode == "alternate" then
-            local is_tail
-            if M.config.alternate_start == "tail" then
-                is_tail = (line_index % 2 == 1)
-            else
-                is_tail = (line_index % 2 == 0)
-            end
-            return is_tail and right or left
-        end
-    else
-        if mode == "head" then
-            return 0
-        elseif mode == "tail" then
-            return max_col
-        elseif mode == "alternate" then
-            local is_tail
-            if M.config.alternate_start == "tail" then
-                is_tail = (line_index % 2 == 1)
-            else
-                is_tail = (line_index % 2 == 0)
-            end
-            return is_tail and max_col or 0
+---@param line_index integer 1-indexed
+---@return boolean is_tail
+function M.is_tail_line(mode, line_index)
+    if mode == "tail" then
+        return true
+    elseif mode == "head" then
+        return false
+    elseif mode == "alternate" then
+        if M.config.alternate_start == "tail" then
+            return (line_index % 2 == 1)
+        else
+            return (line_index % 2 == 0)
         end
     end
-
-    return 0
-end
-
----Add a cursor at line and 0-indexed column
----@param line integer 1-indexed
----@param col integer 0-indexed
-local function add_cursor_at(line, col)
-    local b = get_backend()
-    if b == "vm" then
-        vim.api.nvim_win_set_cursor(0, { line, col })
-        vim.fn["vm#commands#add_cursor_at_pos"](0)
-    else
-        local mc = require("multicursor-nvim")
-        mc.action(function(ctx)
-            if not mc.hasCursors() then
-                local main = ctx:mainCursor()
-                main:setPos({ line, col + 1 })
-            else
-                local cur = ctx:addCursor()
-                cur:setPos({ line, col + 1 })
-                cur:select()
-            end
-        end)
-    end
+    return false
 end
 
 ---Apply multi-cursor mode to current selection or range
@@ -173,28 +138,97 @@ function M.apply(mode, opts)
     M.clear()
 
     local b = get_backend()
+    local bufnr = vim.api.nvim_get_current_buf()
+
     if b == "vm" then
-        local idx = 1
+        local line_index = 1
         for l = s_line, e_line do
-            local col = M.get_col(mode, l, idx, is_block, s_col, e_col)
-            add_cursor_at(l, col)
-            idx = idx + 1
+            local line_str = vim.api.nvim_buf_get_lines(bufnr, l - 1, l, true)[1] or ""
+            local len = #line_str
+            local is_tail = M.is_tail_line(mode, line_index)
+
+            if is_tail then
+                if is_block then
+                    if (e_col + 1) < len then
+                        -- Position directly after block right edge inside text
+                        vim.api.nvim_win_set_cursor(0, { l, e_col + 1 })
+                        vim.fn["vm#commands#add_cursor_at_pos"](0)
+                    else
+                        -- Position at EOL using VM extra_spaces
+                        vim.api.nvim_win_set_cursor(0, { l, math.max(0, len - 1) })
+                        vim.fn["vm#commands#add_cursor_at_pos"](0)
+                        local r_idx = #vim.b.VM_Selection.Regions - 1
+                        vim.cmd(string.format([[
+                            call b:VM_Selection.Edit.extra_spaces.add(b:VM_Selection.Regions[%d])
+                            let b:VM_Selection.Regions[%d].a = b:VM_Selection.Regions[%d].a + 1
+                            let b:VM_Selection.Regions[%d].b = b:VM_Selection.Regions[%d].b + 1
+                        ]], r_idx, r_idx, r_idx, r_idx, r_idx))
+                    end
+                else
+                    -- Linewise tail: place at EOL and add extra space so cursor is truly past line end
+                    vim.api.nvim_win_set_cursor(0, { l, math.max(0, len - 1) })
+                    vim.fn["vm#commands#add_cursor_at_pos"](0)
+                    local r_idx = #vim.b.VM_Selection.Regions - 1
+                    vim.cmd(string.format([[
+                        call b:VM_Selection.Edit.extra_spaces.add(b:VM_Selection.Regions[%d])
+                        let b:VM_Selection.Regions[%d].a = b:VM_Selection.Regions[%d].a + 1
+                        let b:VM_Selection.Regions[%d].b = b:VM_Selection.Regions[%d].b + 1
+                    ]], r_idx, r_idx, r_idx, r_idx, r_idx))
+                end
+            else
+                -- Head: position at line start or block left edge
+                local col = is_block and math.min(s_col, math.max(0, len - 1)) or 0
+                vim.api.nvim_win_set_cursor(0, { l, col })
+                vim.fn["vm#commands#add_cursor_at_pos"](0)
+            end
+
+            line_index = line_index + 1
         end
+
+        -- Map i, a, c, s so pressing any of them starts insert at the exact target positions
+        local function start_insert()
+            M.cleanup_submode(bufnr)
+            vim.cmd("call b:VM_Selection.Insert.key('i')")
+        end
+
+        local kopts = { buffer = bufnr, nowait = true }
+        vim.keymap.set("n", "i", start_insert, kopts)
+        vim.keymap.set("n", "a", start_insert, kopts)
+        vim.keymap.set("n", "c", start_insert, kopts)
+        vim.keymap.set("n", "s", start_insert, kopts)
+        vim.keymap.set("n", "<Esc>", function()
+            M.clear()
+        end, kopts)
     else
         local mc = require("multicursor-nvim")
+        pcall(function() vim.opt.virtualedit = "onemore" end)
         mc.action(function(ctx)
             local main = ctx:mainCursor()
-            local idx = 1
+            local line_index = 1
             for l = s_line, e_line do
-                local col = M.get_col(mode, l, idx, is_block, s_col, e_col)
+                local line_str = vim.api.nvim_buf_get_lines(bufnr, l - 1, l, true)[1] or ""
+                local len = #line_str
+                local is_tail = M.is_tail_line(mode, line_index)
+                local col_1_indexed
+
+                if is_tail then
+                    if is_block then
+                        col_1_indexed = math.min(e_col + 2, len + 1)
+                    else
+                        col_1_indexed = len + 1
+                    end
+                else
+                    col_1_indexed = is_block and (math.min(s_col, math.max(0, len - 1)) + 1) or 1
+                end
+
                 if l == s_line then
-                    main:setPos({ l, col + 1 })
+                    main:setPos({ l, col_1_indexed })
                 else
                     local cur = ctx:addCursor()
-                    cur:setPos({ l, col + 1 })
+                    cur:setPos({ l, col_1_indexed })
                     cur:select()
                 end
-                idx = idx + 1
+                line_index = line_index + 1
             end
         end)
     end
@@ -203,7 +237,7 @@ function M.apply(mode, opts)
     local count = e_line - s_line + 1
     vim.api.nvim_echo({
         { string.format("-- 多光标 [%s] (%d 行) -- ", title, count), "ModeMsg" },
-        { "i/a: 输入 | c: 替换 | Esc: 退出", "Comment" },
+        { "直接按 i / a 开始输入 | Esc 退出", "Comment" },
     }, false, {})
 end
 
@@ -258,6 +292,15 @@ function M.setup(opts)
     M.config = vim.tbl_deep_extend("force", default_config, opts or {})
     register_commands()
 
+    -- Autocommands to prevent keymap leakage
+    local grp = vim.api.nvim_create_augroup("MulticursorLineCleanup", { clear = true })
+    vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
+        group = grp,
+        callback = function(ev)
+            M.cleanup_submode(ev.buf)
+        end,
+    })
+
     if not M.config.create_keymaps then
         return
     end
@@ -268,19 +311,19 @@ function M.setup(opts)
 
     -- Visual Mode mappings (快速 2 键触发)
     if v.head and v.head ~= "" then
-        set("x", v.head, function() M.apply("head") end, { desc = "多光标: 选中行首加光标" })
+        set("x", v.head, function() M.apply("head") end, { desc = "多光标: 选区行首/左边缘加光标" })
     end
     if v.tail and v.tail ~= "" then
-        set("x", v.tail, function() M.apply("tail") end, { desc = "多光标: 选中行尾加光标" })
+        set("x", v.tail, function() M.apply("tail") end, { desc = "多光标: 选区行尾/右边缘加光标" })
     end
     if v.alternate and v.alternate ~= "" then
-        set("x", v.alternate, function() M.apply("alternate") end, { desc = "多光标: 选中首尾交替加光标" })
+        set("x", v.alternate, function() M.apply("alternate") end, { desc = "多光标: 选区首尾/左右交替加光标" })
     end
 
     -- Visual Mode 别名（兼容 <leader>m 助记分组）
-    set("x", "<leader>mh", function() M.apply("head") end, { desc = "多光标: 选中行首加光标" })
-    set("x", "<leader>mt", function() M.apply("tail") end, { desc = "多光标: 选中行尾加光标" })
-    set("x", "<leader>ma", function() M.apply("alternate") end, { desc = "多光标: 选中首尾交替加光标" })
+    set("x", "<leader>mh", function() M.apply("head") end, { desc = "多光标: 选区行首加光标" })
+    set("x", "<leader>mt", function() M.apply("tail") end, { desc = "多光标: 选区行尾加光标" })
+    set("x", "<leader>ma", function() M.apply("alternate") end, { desc = "多光标: 选区首尾交替加光标" })
 
     -- Normal Mode mappings (支持数字前缀例如 5<leader>mh)
     if n.head and n.head ~= "" then
