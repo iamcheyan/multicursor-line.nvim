@@ -74,5 +74,22 @@ assert(alt_bol_r[4].a == 1, "Line 4 should be absolute bol (col 1)")
 assert(alt_bol_r[5].a == #lines[5], "Line 5 should be tail")
 mcline.clear()
 
+-- 6. Test Esc in normal mode immediately resets VM
+mcline.apply("head", { line1 = 1, line2 = 5 })
+assert(vim.b.visual_multi == 1, "VM should be active before Esc")
+vim.cmd([[execute "normal \<Esc>"]])
+assert(vim.b.visual_multi == nil, "VM must be completely reset after Esc")
+
+-- 7. Test InsertLeave auto-resets VM and removes all secondary cursors
+mcline.apply("head", { line1 = 1, line2 = 3 })
+assert(vim.b.visual_multi == 1, "VM should be active before typing")
+vim.cmd([[execute "normal iPREFIX \<Esc>"]])
+vim.wait(100, function() return vim.b.visual_multi == nil end)
+assert(vim.b.visual_multi == nil, "VM must be completely reset after InsertLeave")
+local l1 = vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]
+local l2 = vim.api.nvim_buf_get_lines(0, 1, 2, false)[1]
+assert(l1:find("PREFIX"), "Line 1 must contain PREFIX: " .. l1)
+assert(l2:find("PREFIX"), "Line 2 must contain PREFIX: " .. l2)
+
 vim.cmd("bdelete!")
-print("ALL MULTICURSOR-LINE INDENTATION TESTS PASSED!")
+print("ALL MULTICURSOR-LINE INDENTATION AND ESC TESTS PASSED!")

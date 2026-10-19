@@ -64,19 +64,28 @@ function M.cleanup_submode(bufnr)
         return
     end
 
-    local keys = { "i", "a", "c", "s", "<Esc>" }
+    local keys = { "i", "a", "c", "s", "<Esc>", "<C-c>" }
     for _, k in ipairs(keys) do
         pcall(vim.keymap.del, "n", k, { buffer = bufnr })
     end
 end
 
 ---Clear active cursors
-function M.clear()
-    M.cleanup_submode()
+---@param bufnr? integer
+function M.clear(bufnr)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
+    M.cleanup_submode(bufnr)
     local b = get_backend()
     if b == "vm" then
-        if vim.b.visual_multi == 1 then
-            pcall(vim.cmd, "call b:VM_Selection.Edit.extra_spaces.remove()")
+        local is_vm = false
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            is_vm = (vim.b[bufnr].visual_multi == 1 or vim.b[bufnr].visual_multi == true)
+        end
+        if not is_vm then
+            is_vm = (vim.b.visual_multi == 1 or vim.b.visual_multi == true or vim.fn.exists("b:visual_multi") == 1)
+        end
+        if is_vm then
+            pcall(vim.cmd, "silent! call b:VM_Selection.Edit.extra_spaces.remove()")
             pcall(vim.fn["vm#reset"])
         end
     else
@@ -206,7 +215,24 @@ function M.apply(mode, opts)
 
         -- Map i, a, c, s so pressing any of them starts insert mode at target positions
         local function start_insert()
-            M.cleanup_submode(bufnr)
+            -- Unbind i, a, c, s from normal mode so native insert works,
+            -- but KEEP <Esc> and <C-c> mapped!
+            local edit_keys = { "i", "a", "c", "s" }
+            for _, k in ipairs(edit_keys) do
+                pcall(vim.keymap.del, "n", k, { buffer = bufnr })
+            end
+
+            -- Automatically clear multicursor when leaving insert mode
+            vim.api.nvim_create_autocmd("InsertLeave", {
+                buffer = bufnr,
+                once = true,
+                callback = function()
+                    vim.schedule(function()
+                        M.clear(bufnr)
+                    end)
+                end,
+            })
+
             -- Only now, at the moment of typing, transition EOL tail cursors to insert mode
             for _, r_idx in ipairs(tail_eol_region_indices) do
                 vim.cmd(string.format([[
@@ -224,7 +250,10 @@ function M.apply(mode, opts)
         vim.keymap.set("n", "c", start_insert, kopts)
         vim.keymap.set("n", "s", start_insert, kopts)
         vim.keymap.set("n", "<Esc>", function()
-            M.clear()
+            M.clear(bufnr)
+        end, kopts)
+        vim.keymap.set("n", "<C-c>", function()
+            M.clear(bufnr)
         end, kopts)
     else
         local mc = require("multicursor-nvim")
@@ -258,6 +287,23 @@ function M.apply(mode, opts)
                 line_index = line_index + 1
             end
         end)
+
+        vim.api.nvim_create_autocmd("InsertLeave", {
+            buffer = bufnr,
+            once = true,
+            callback = function()
+                vim.schedule(function()
+                    M.clear(bufnr)
+                end)
+            end,
+        })
+        local kopts = { buffer = bufnr, nowait = true }
+        vim.keymap.set("n", "<Esc>", function()
+            M.clear(bufnr)
+        end, kopts)
+        vim.keymap.set("n", "<C-c>", function()
+            M.clear(bufnr)
+        end, kopts)
     end
 
     local title_map = {
