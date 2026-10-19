@@ -10,17 +10,18 @@ local M = {}
 ---@field end_line integer Target ending line number (1-indexed)
 ---@field current_line integer Current line index reached
 ---@field active boolean Whether a progressive session is active
+---@field is_all_selected boolean Whether all lines are currently selected
 
 ---@class McLineKeymaps
----@field step? string|false Keymap for progressive stepping inside active session (default: "<C-n>")
----@field select_all? string|false Keymap for one-shot select all inside active session (default: "<M-C-n>")
----@field standalone_step? string|false Global standalone key for stepping without prefix (default: false)
+---@field step? string|false Extra key for stepping (optional)
+---@field step_back? string|false Extra key for stepping back (optional)
+---@field toggle_all? string|false Extra key for toggling select all (optional)
 
 ---@class McLineConfig
 ---@field default_mode McLineMode Default mode ("head" | "tail" | "alternate")
 ---@field alternate_start "tail" | "head" Which position the 1st line takes in alternate mode (default: "tail")
 ---@field prefix string Keymap prefix for starter keys (default: "<leader>m")
----@field dynamic_layer boolean Whether to multiplex keys via multicursor's keymap layer (default: true)
+---@field dynamic_layer boolean Whether to activate the interactive single-key layer (default: true)
 ---@field keymaps McLineKeymaps
 
 ---@type McLineConfig
@@ -30,9 +31,9 @@ local default_config = {
     prefix = "<leader>m",
     dynamic_layer = true,
     keymaps = {
-        step = "<C-n>",
-        select_all = "<M-C-n>",
-        standalone_step = false,
+        step = false,
+        step_back = false,
+        toggle_all = false,
     },
 }
 
@@ -132,7 +133,7 @@ function M.set_mode(mode)
     end
 end
 
----Progressively append next line cursor (corresponding to Ctrl-N)
+---Progressively append next line cursor down (corresponding to n or j)
 ---@param mode? McLineMode
 ---@param range? { start_line?: integer, end_line?: integer }
 function M.step(mode, range)
@@ -151,6 +152,7 @@ function M.step(mode, range)
             end_line = e_line,
             current_line = s_line,
             active = true,
+            is_all_selected = false,
         }
 
         mc.action(function(ctx)
@@ -158,6 +160,11 @@ function M.step(mode, range)
             local col = M.get_col_for_line(state.mode, state.start_line, 1)
             main:setPos({ state.start_line, col })
         end)
+        return
+    end
+
+    if state.is_all_selected then
+        vim.notify("multicursor-line: All lines already selected (press A to toggle)", vim.log.levels.INFO)
         return
     end
 
@@ -179,9 +186,52 @@ function M.step(mode, range)
     end)
 
     state.current_line = next_line
+    if state.current_line == state.end_line then
+        state.is_all_selected = true
+    end
 end
 
----Select all lines in range at target positions instantaneously (corresponding to Alt-Ctrl-N)
+---Step backward / remove the last added cursor (corresponding to p or k)
+function M.step_back()
+    if not state or not state.active then
+        return
+    end
+
+    if state.is_all_selected then
+        state.is_all_selected = false
+    end
+
+    if state.current_line > state.start_line then
+        mc.action(function(ctx)
+            ctx:mainCursor():delete()
+        end)
+        state.current_line = state.current_line - 1
+    else
+        vim.notify("multicursor-line: At the first line", vim.log.levels.INFO)
+    end
+end
+
+---Cancel select-all and revert to a single cursor at start_line
+function M.cancel_select_all()
+    if not state then
+        return
+    end
+
+    if mc.hasCursors() then
+        mc.clearCursors()
+    end
+
+    mc.action(function(ctx)
+        local main = ctx:mainCursor()
+        local col = M.get_col_for_line(state.mode, state.start_line, 1)
+        main:setPos({ state.start_line, col })
+    end)
+
+    state.current_line = state.start_line
+    state.is_all_selected = false
+end
+
+---Select all lines in range at target positions instantaneously
 ---@param mode? McLineMode
 ---@param range? { start_line?: integer, end_line?: integer }
 function M.select_all(mode, range)
@@ -220,7 +270,22 @@ function M.select_all(mode, range)
         end_line = e_line,
         current_line = e_line,
         active = true,
+        is_all_selected = true,
     }
+end
+
+---Toggle select-all: if all lines selected, cancel back to line 1; otherwise select all
+function M.toggle_all()
+    if not state or not state.active then
+        M.select_all()
+        return
+    end
+
+    if state.is_all_selected then
+        M.cancel_select_all()
+    else
+        M.select_all(state.mode)
+    end
 end
 
 ---Start a mode and trigger the first cursor
@@ -241,7 +306,7 @@ end
 
 ---Register user commands
 local function register_commands()
-    -- :McLine [head|tail|alternate] [step|all]
+    -- :McLine [head|tail|alternate] [step|all|toggle]
     vim.api.nvim_create_user_command("McLine", function(opts)
         local args = vim.split(opts.args, "%s+", { trimempty = true })
         local mode = args[1]
@@ -253,6 +318,8 @@ local function register_commands()
 
         if action == "all" then
             M.select_all(mode, range)
+        elseif action == "toggle" then
+            M.toggle_all()
         else
             M.step(mode, range)
         end
@@ -264,7 +331,7 @@ local function register_commands()
             if #parts <= 2 then
                 return { "head", "tail", "alternate" }
             elseif #parts == 3 then
-                return { "step", "all" }
+                return { "step", "all", "toggle" }
             end
             return {}
         end,
@@ -312,11 +379,24 @@ function M.setup(opts)
     M.config = vim.tbl_deep_extend("force", default_config, opts or {})
     register_commands()
 
+    local augroup = vim.api.nvim_create_augroup("MulticursorLineSession", { clear = true })
+
     -- Reset state if buffer or window changes
     vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
-        group = vim.api.nvim_create_augroup("MulticursorLineCleanup", { clear = true }),
+        group = augroup,
         callback = function()
             M.reset()
+        end,
+    })
+
+    -- When entering insert mode, complete session setup so j/k/n/p return to normal afterwards
+    vim.api.nvim_create_autocmd("ModeChanged", {
+        group = augroup,
+        pattern = "*:i*",
+        callback = function()
+            if state and state.active then
+                state.active = false
+            end
         end,
     })
 
@@ -325,44 +405,83 @@ function M.setup(opts)
 
     -- Starter keybindings
     if prefix and prefix ~= "" then
-        set({ "n", "x" }, prefix .. "h", function() M.start("head") end, { desc = "MC-Line: Head mode (step)" })
-        set({ "n", "x" }, prefix .. "t", function() M.start("tail") end, { desc = "MC-Line: Tail mode (step)" })
-        set({ "n", "x" }, prefix .. "a", function() M.start("alternate") end, { desc = "MC-Line: Alternate mode (step)" })
+        set({ "n", "x" }, prefix .. "h", function() M.start("head") end, { desc = "MC-Line: Head mode" })
+        set({ "n", "x" }, prefix .. "t", function() M.start("tail") end, { desc = "MC-Line: Tail mode" })
+        set({ "n", "x" }, prefix .. "a", function() M.start("alternate") end, { desc = "MC-Line: Alternate mode" })
 
         set({ "n", "x" }, prefix .. "H", function() M.select_all("head") end, { desc = "MC-Line: Select all heads" })
         set({ "n", "x" }, prefix .. "T", function() M.select_all("tail") end, { desc = "MC-Line: Select all tails" })
         set({ "n", "x" }, prefix .. "A", function() M.select_all("alternate") end, { desc = "MC-Line: Select all alternate" })
     end
 
-    -- Standalone step mapping (if configured, e.g. <M-n>)
-    if M.config.keymaps.standalone_step then
-        set({ "n", "x" }, M.config.keymaps.standalone_step, function()
-            M.step()
-        end, { desc = "MC-Line: Step next line cursor" })
-    end
-
-    -- Dynamic keymap layer integration: multiplex <C-n> and <M-C-n> when in multi-cursor mode
+    -- Interactive dynamic layer: single-key navigation during active line session
     if M.config.dynamic_layer then
         mc.addKeymapLayer(function(layerSet)
-            if M.config.keymaps.step then
-                layerSet({ "n", "x" }, M.config.keymaps.step, function()
-                    if state and state.active then
-                        M.step()
-                    else
-                        mc.lineAddCursor(1)
-                    end
-                end)
-            end
+            -- Step down: n or j
+            layerSet({ "n", "x" }, "j", function()
+                if state and state.active then
+                    M.step()
+                else
+                    vim.cmd("normal! j")
+                end
+            end)
+            layerSet({ "n", "x" }, "n", function()
+                if state and state.active then
+                    M.step()
+                else
+                    vim.cmd("normal! n")
+                end
+            end)
 
-            if M.config.keymaps.select_all then
-                layerSet({ "n", "x" }, M.config.keymaps.select_all, function()
-                    M.select_all()
-                end)
-            end
+            -- Step back / up: k or p
+            layerSet({ "n", "x" }, "k", function()
+                if state and state.active then
+                    M.step_back()
+                else
+                    vim.cmd("normal! k")
+                end
+            end)
+            layerSet({ "n", "x" }, "p", function()
+                if state and state.active then
+                    M.step_back()
+                else
+                    vim.cmd("normal! p")
+                end
+            end)
 
+            -- Toggle select-all: A
+            layerSet({ "n", "x" }, "A", function()
+                if state and state.active then
+                    M.toggle_all()
+                else
+                    vim.cmd("normal! A")
+                end
+            end)
+
+            -- Cancel session
+            layerSet({ "n", "x" }, "q", function()
+                M.clear()
+            end)
             layerSet("n", "<Esc>", function()
                 M.clear()
             end)
+
+            -- Optional extra keybindings if user explicitly configured them
+            if M.config.keymaps.step then
+                layerSet({ "n", "x" }, M.config.keymaps.step, function()
+                    M.step()
+                end)
+            end
+            if M.config.keymaps.step_back then
+                layerSet({ "n", "x" }, M.config.keymaps.step_back, function()
+                    M.step_back()
+                end)
+            end
+            if M.config.keymaps.toggle_all then
+                layerSet({ "n", "x" }, M.config.keymaps.toggle_all, function()
+                    M.toggle_all()
+                end)
+            end
         end)
     end
 end

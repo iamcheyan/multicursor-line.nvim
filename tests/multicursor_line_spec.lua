@@ -44,6 +44,7 @@ assert(mcline.is_active(), "Session should be active")
 local st = mcline.get_state()
 assert(st.current_line == 1, "Step 1 should be on line 1")
 
+-- Step down (n / j)
 mcline.step()
 st = mcline.get_state()
 assert(st.current_line == 2, "Step 2 should be on line 2")
@@ -54,19 +55,41 @@ st = mcline.get_state()
 assert(st.current_line == 3, "Step 3 should be on line 3")
 assert(mc.numCursors() == 3, "Should have 3 cursors")
 
+-- Step back (p / k)
+mcline.step_back()
+st = mcline.get_state()
+assert(st.current_line == 2, "After step_back should be on line 2")
+assert(mc.numCursors() == 2, "Should have 2 cursors after step_back")
+
+-- Step forward again to 4
+mcline.step()
 mcline.step()
 st = mcline.get_state()
-assert(st.current_line == 4, "Step 4 should be on line 4")
+assert(st.current_line == 4, "Should be on line 4")
 assert(mc.numCursors() == 4, "Should have 4 cursors")
 
 mcline.clear()
 assert(not mcline.is_active(), "Session should be cleared")
 assert(mc.numCursors() == 1, "Cursors should be cleared")
 
--- Test 3: Select all
-mcline.select_all("head", { start_line = 1, end_line = 4 })
+-- Test 3: Toggle all (A)
+mcline.start("head", { start_line = 1, end_line = 4 })
+assert(mc.numCursors() == 1, "Start with 1 cursor")
+
+-- Press A to select all
+mcline.toggle_all()
 assert(mc.numCursors() == 4, "Select all should generate 4 cursors")
+st = mcline.get_state()
+assert(st.is_all_selected == true, "is_all_selected should be true")
+
+-- Press A again to cancel select all
+mcline.toggle_all()
+assert(mc.numCursors() == 1, "Toggle again should revert to 1 cursor")
+st = mcline.get_state()
+assert(st.is_all_selected == false, "is_all_selected should be false")
+assert(st.current_line == 1, "Reverted to line 1")
+
 mcline.clear()
 
 vim.cmd("bdelete!")
-print("ALL MULTICURSOR-LINE TESTS PASSED!")
+print("ALL MULTICURSOR-LINE EXTENDED TESTS PASSED!")
