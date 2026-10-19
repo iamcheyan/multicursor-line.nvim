@@ -3,28 +3,36 @@ local M = {}
 ---@alias McLineMode "head" | "tail" | "alternate"
 ---@alias McBackend "vm" | "multicursor"
 
----@class McLineState
----@field mode McLineMode
----@field min_line integer
----@field max_line integer
----@field count integer
+---@class McLineKeymaps
+---@field head string
+---@field tail string
+---@field alternate string
 
 ---@class McLineConfig
 ---@field backend "auto" | "vm" | "multicursor"
 ---@field alternate_start "tail" | "head"
----@field prefix string
+---@field create_keymaps boolean
+---@field visual_keys McLineKeymaps
+---@field normal_keys McLineKeymaps
 
 ---@type McLineConfig
 local default_config = {
     backend = "auto",
     alternate_start = "tail",
-    prefix = "<leader>m",
+    create_keymaps = true,
+    visual_keys = {
+        head = "<leader>h",
+        tail = "<leader>t",
+        alternate = "<leader>a",
+    },
+    normal_keys = {
+        head = "<leader>mh",
+        tail = "<leader>mt",
+        alternate = "<leader>ma",
+    },
 }
 
 M.config = vim.deepcopy(default_config)
-
----@type McLineState|nil
-local state = nil
 
 ---Detect available multi-cursor engine
 ---@return McBackend
@@ -32,7 +40,6 @@ local function get_backend()
     if M.config.backend == "vm" or M.config.backend == "multicursor" then
         return M.config.backend
     end
-    -- Auto detection: prefer vim-visual-multi for live real-time typing
     if vim.fn.exists("*vm#commands#add_cursor_at_pos") == 1 or package.loaded["vim-visual-multi"] or vim.g.loaded_visual_multi then
         return "vm"
     end
@@ -43,25 +50,8 @@ local function get_backend()
     return "vm"
 end
 
----Reset state
-function M.reset()
-    state = nil
-end
-
----Check if VM or multicursor has active cursors
-local function has_active_cursors()
-    local b = get_backend()
-    if b == "vm" then
-        return vim.b.visual_multi == 1
-    else
-        local ok, mc = pcall(require, "multicursor-nvim")
-        return ok and mc.hasCursors()
-    end
-end
-
 ---Clear active cursors
 function M.clear()
-    M.reset()
     local b = get_backend()
     if b == "vm" then
         if vim.b.visual_multi == 1 then
@@ -78,25 +68,47 @@ end
 ---Calculate column for a line
 ---@param mode McLineMode
 ---@param line_nr integer 1-indexed
----@param line_index integer 1-indexed
+---@param line_index integer 1-indexed (position in selection: 1, 2, 3...)
+---@param is_block? boolean
+---@param s_col? integer 0-indexed block start col
+---@param e_col? integer 0-indexed block end col
 ---@return integer col_0_indexed 0-indexed column
-function M.get_col(mode, line_nr, line_index)
+function M.get_col(mode, line_nr, line_index, is_block, s_col, e_col)
     local line_str = vim.api.nvim_buf_get_lines(0, line_nr - 1, line_nr, true)[1] or ""
     local max_col = math.max(0, #line_str - 1)
 
-    if mode == "head" then
-        return 0
-    elseif mode == "tail" then
-        return max_col
-    elseif mode == "alternate" then
-        local is_tail
-        if M.config.alternate_start == "tail" then
-            is_tail = (line_index % 2 == 1)
-        else
-            is_tail = (line_index % 2 == 0)
+    if is_block and s_col and e_col then
+        local left = math.min(s_col, max_col)
+        local right = math.min(e_col, max_col)
+        if mode == "head" then
+            return left
+        elseif mode == "tail" then
+            return right
+        elseif mode == "alternate" then
+            local is_tail
+            if M.config.alternate_start == "tail" then
+                is_tail = (line_index % 2 == 1)
+            else
+                is_tail = (line_index % 2 == 0)
+            end
+            return is_tail and right or left
         end
-        return is_tail and max_col or 0
+    else
+        if mode == "head" then
+            return 0
+        elseif mode == "tail" then
+            return max_col
+        elseif mode == "alternate" then
+            local is_tail
+            if M.config.alternate_start == "tail" then
+                is_tail = (line_index % 2 == 1)
+            else
+                is_tail = (line_index % 2 == 0)
+            end
+            return is_tail and max_col or 0
+        end
     end
+
     return 0
 end
 
@@ -123,95 +135,49 @@ local function add_cursor_at(line, col)
     end
 end
 
----Add cursor down (向下选)
+---Apply multi-cursor mode to current selection or range
 ---@param mode McLineMode
-function M.step_down(mode)
-    local total = vim.fn.line("$")
-    if not state or not has_active_cursors() then
+---@param opts? { line1?: integer, line2?: integer }
+function M.apply(mode, opts)
+    local cur_mode = vim.fn.mode()
+    local is_visual = cur_mode:match("[vV\22]") ~= nil
+
+    local s_line, e_line
+    local is_block = false
+    local s_col, e_col
+
+    if is_visual then
+        -- Read visual mode selection endpoints
+        local p_v = vim.fn.getpos("v")
+        local p_c = vim.fn.getpos(".")
+        -- Exit visual mode
+        local esc = vim.api.nvim_replace_termcodes("<Esc>", true, false, true)
+        vim.api.nvim_feedkeys(esc, "nx", false)
+
+        s_line = math.min(p_v[2], p_c[2])
+        e_line = math.max(p_v[2], p_c[2])
+        s_col = math.min(p_v[3], p_c[3]) - 1
+        e_col = math.max(p_v[3], p_c[3]) - 1
+        is_block = (cur_mode == "\22" or cur_mode == "<C-v>")
+    elseif opts and opts.line1 and opts.line2 then
+        s_line = opts.line1
+        e_line = opts.line2
+    else
         local cur = vim.fn.line(".")
-        local c1 = M.get_col(mode, cur, 1)
-        add_cursor_at(cur, c1)
-
-        local next_line = math.min(total, cur + 1)
-        if next_line > cur then
-            local c2 = M.get_col(mode, next_line, 2)
-            add_cursor_at(next_line, c2)
-            state = { mode = mode, min_line = cur, max_line = next_line, count = 2 }
-        else
-            state = { mode = mode, min_line = cur, max_line = cur, count = 1 }
-        end
-        return
+        local count = vim.v.count
+        s_line = cur
+        e_line = (count > 1) and (cur + count - 1) or cur
     end
 
-    if state.max_line >= total then
-        vim.notify("multicursor-line: 已到文件末尾", vim.log.levels.INFO)
-        return
-    end
-
-    state.max_line = state.max_line + 1
-    state.count = state.count + 1
-    local c = M.get_col(state.mode, state.max_line, state.count)
-    add_cursor_at(state.max_line, c)
-end
-
----Add cursor up (向上选)
----@param mode McLineMode
-function M.step_up(mode)
-    if not state or not has_active_cursors() then
-        local cur = vim.fn.line(".")
-        local c1 = M.get_col(mode, cur, 1)
-        add_cursor_at(cur, c1)
-
-        local prev_line = math.max(1, cur - 1)
-        if prev_line < cur then
-            local c2 = M.get_col(mode, prev_line, 2)
-            add_cursor_at(prev_line, c2)
-            state = { mode = mode, min_line = prev_line, max_line = cur, count = 2 }
-        else
-            state = { mode = mode, min_line = cur, max_line = cur, count = 1 }
-        end
-        return
-    end
-
-    if state.min_line <= 1 then
-        vim.notify("multicursor-line: 已到文件起始行", vim.log.levels.INFO)
-        return
-    end
-
-    state.min_line = state.min_line - 1
-    state.count = state.count + 1
-    local c = M.get_col(state.mode, state.min_line, state.count)
-    add_cursor_at(state.min_line, c)
-end
-
----Select all lines in range
----@param mode McLineMode
----@param s_line? integer
----@param e_line? integer
-function M.select_all(mode, s_line, e_line)
-    if not s_line or not e_line then
-        local vmode = vim.fn.mode()
-        if vmode:match("[vV\22]") then
-            local vpos = vim.fn.getpos("v")
-            local curpos = vim.fn.getpos(".")
-            vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
-            s_line = math.min(vpos[2], curpos[2])
-            e_line = math.max(vpos[2], curpos[2])
-        else
-            -- Normal mode: from current line to buffer end (or whole buffer if count is 0)
-            s_line = vim.fn.line(".")
-            e_line = vim.fn.line("$")
-        end
-    end
-
+    -- Clear any previous multi-cursor instance
     M.clear()
 
     local b = get_backend()
     if b == "vm" then
         local idx = 1
         for l = s_line, e_line do
-            local c = M.get_col(mode, l, idx)
-            add_cursor_at(l, c)
+            local col = M.get_col(mode, l, idx, is_block, s_col, e_col)
+            add_cursor_at(l, col)
             idx = idx + 1
         end
     else
@@ -220,68 +186,70 @@ function M.select_all(mode, s_line, e_line)
             local main = ctx:mainCursor()
             local idx = 1
             for l = s_line, e_line do
-                local c = M.get_col(mode, l, idx)
+                local col = M.get_col(mode, l, idx, is_block, s_col, e_col)
                 if l == s_line then
-                    main:setPos({ l, c + 1 })
+                    main:setPos({ l, col + 1 })
                 else
                     local cur = ctx:addCursor()
-                    cur:setPos({ l, c + 1 })
+                    cur:setPos({ l, col + 1 })
+                    cur:select()
                 end
                 idx = idx + 1
             end
         end)
     end
 
-    state = { mode = mode, min_line = s_line, max_line = e_line, count = e_line - s_line + 1 }
+    local title = mode == "head" and "行首" or (mode == "tail" and "行尾" or "首尾交替")
+    local count = e_line - s_line + 1
+    vim.api.nvim_echo({
+        { string.format("-- 多光标 [%s] (%d 行) -- ", title, count), "ModeMsg" },
+        { "i/a: 输入 | c: 替换 | Esc: 退出", "Comment" },
+    }, false, {})
+end
+
+---Head mode (行首加光标)
+---@param opts? { line1?: integer, line2?: integer }
+function M.head(opts)
+    M.apply("head", opts)
+end
+
+---Tail mode (行尾加光标)
+---@param opts? { line1?: integer, line2?: integer }
+function M.tail(opts)
+    M.apply("tail", opts)
+end
+
+---Alternate mode (首尾交替加光标)
+---@param opts? { line1?: integer, line2?: integer }
+function M.alternate(opts)
+    M.apply("alternate", opts)
+end
+
+---Backward compatibility helper
+---@param mode McLineMode
+---@param s_line? integer
+---@param e_line? integer
+function M.select_all(mode, s_line, e_line)
+    M.apply(mode, { line1 = s_line, line2 = e_line })
 end
 
 ---Register user commands
 local function register_commands()
-    -- :McLineHead [down|up|all]
     vim.api.nvim_create_user_command("McLineHead", function(opts)
-        local action = opts.args ~= "" and opts.args or (opts.range == 2 and "all" or "down")
-        if action == "all" then
-            local s = opts.range == 2 and opts.line1 or nil
-            local e = opts.range == 2 and opts.line2 or nil
-            M.select_all("head", s, e)
-        elseif action == "up" then
-            M.step_up("head")
-        else
-            M.step_down("head")
-        end
-    end, { range = true, nargs = "?" })
+        M.apply("head", { line1 = opts.line1, line2 = opts.line2 })
+    end, { range = true, desc = "多光标: 行首加光标" })
 
-    -- :McLineTail [down|up|all]
     vim.api.nvim_create_user_command("McLineTail", function(opts)
-        local action = opts.args ~= "" and opts.args or (opts.range == 2 and "all" or "down")
-        if action == "all" then
-            local s = opts.range == 2 and opts.line1 or nil
-            local e = opts.range == 2 and opts.line2 or nil
-            M.select_all("tail", s, e)
-        elseif action == "up" then
-            M.step_up("tail")
-        else
-            M.step_down("tail")
-        end
-    end, { range = true, nargs = "?" })
+        M.apply("tail", { line1 = opts.line1, line2 = opts.line2 })
+    end, { range = true, desc = "多光标: 行尾加光标" })
 
-    -- :McLineAlt [down|up|all]
     vim.api.nvim_create_user_command("McLineAlt", function(opts)
-        local action = opts.args ~= "" and opts.args or (opts.range == 2 and "all" or "down")
-        if action == "all" then
-            local s = opts.range == 2 and opts.line1 or nil
-            local e = opts.range == 2 and opts.line2 or nil
-            M.select_all("alternate", s, e)
-        elseif action == "up" then
-            M.step_up("alternate")
-        else
-            M.step_down("alternate")
-        end
-    end, { range = true, nargs = "?" })
+        M.apply("alternate", { line1 = opts.line1, line2 = opts.line2 })
+    end, { range = true, desc = "多光标: 首尾交替加光标" })
 
     vim.api.nvim_create_user_command("McLineClear", function()
         M.clear()
-    end, {})
+    end, { desc = "多光标: 清除所有光标" })
 end
 
 ---Setup plugin
@@ -290,23 +258,40 @@ function M.setup(opts)
     M.config = vim.tbl_deep_extend("force", default_config, opts or {})
     register_commands()
 
+    if not M.config.create_keymaps then
+        return
+    end
+
     local set = vim.keymap.set
-    local p = M.config.prefix
+    local v = M.config.visual_keys
+    local n = M.config.normal_keys
 
-    -- 1. 行首模式 (Head)
-    set("n", p .. "j", function() M.step_down("head") end, { desc = "行首: 向下加一行光标" })
-    set("n", p .. "k", function() M.step_up("head") end, { desc = "行首: 向上加一行光标" })
-    set({ "n", "x" }, p .. "h", function() M.select_all("head") end, { desc = "行首: 全选 (选区或全段)" })
+    -- Visual Mode mappings (快速 2 键触发)
+    if v.head and v.head ~= "" then
+        set("x", v.head, function() M.apply("head") end, { desc = "多光标: 选中行首加光标" })
+    end
+    if v.tail and v.tail ~= "" then
+        set("x", v.tail, function() M.apply("tail") end, { desc = "多光标: 选中行尾加光标" })
+    end
+    if v.alternate and v.alternate ~= "" then
+        set("x", v.alternate, function() M.apply("alternate") end, { desc = "多光标: 选中首尾交替加光标" })
+    end
 
-    -- 2. 行尾模式 (Tail)
-    set("n", p .. "l", function() M.step_down("tail") end, { desc = "行尾: 向下加一行光标" })
-    set("n", p .. "L", function() M.step_up("tail") end, { desc = "行尾: 向上加一行光标" })
-    set({ "n", "x" }, p .. "t", function() M.select_all("tail") end, { desc = "行尾: 全选 (选区或全段)" })
+    -- Visual Mode 别名（兼容 <leader>m 助记分组）
+    set("x", "<leader>mh", function() M.apply("head") end, { desc = "多光标: 选中行首加光标" })
+    set("x", "<leader>mt", function() M.apply("tail") end, { desc = "多光标: 选中行尾加光标" })
+    set("x", "<leader>ma", function() M.apply("alternate") end, { desc = "多光标: 选中首尾交替加光标" })
 
-    -- 3. 首尾交替模式 (Alternate)
-    set("n", p .. "n", function() M.step_down("alternate") end, { desc = "交替: 向下加一行光标" })
-    set("n", p .. "p", function() M.step_up("alternate") end, { desc = "交替: 向上加一行光标" })
-    set({ "n", "x" }, p .. "a", function() M.select_all("alternate") end, { desc = "交替: 全选 (选区或全段)" })
+    -- Normal Mode mappings (支持数字前缀例如 5<leader>mh)
+    if n.head and n.head ~= "" then
+        set("n", n.head, function() M.apply("head") end, { desc = "多光标: 行首加光标" })
+    end
+    if n.tail and n.tail ~= "" then
+        set("n", n.tail, function() M.apply("tail") end, { desc = "多光标: 行尾加光标" })
+    end
+    if n.alternate and n.alternate ~= "" then
+        set("n", n.alternate, function() M.apply("alternate") end, { desc = "多光标: 首尾交替加光标" })
+    end
 end
 
 return M
