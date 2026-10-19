@@ -1,0 +1,107 @@
+*multicursor-line.txt*   Line-based multi-cursor extension for Neovim
+
+==============================================================================
+CONTENTS                                             *multicursor-line-contents*
+
+    1. Introduction ................................ |multicursor-line-intro|
+    2. Installation ................................ |multicursor-line-install|
+    3. Configuration ............................... |multicursor-line-config|
+    4. Modes ....................................... |multicursor-line-modes|
+    5. Commands .................................... |multicursor-line-commands|
+    6. Lua API ..................................... |multicursor-line-api|
+
+==============================================================================
+1. INTRODUCTION                                       *multicursor-line-intro*
+
+multicursor-line.nvim is a Neovim plugin built on top of multicursor.nvim
+(by jake-stewart) designed to generate multiple cursors based on predefined
+line geometry (Head, Tail, and Alternating Tail/Head) either progressively
+or in a single shot across visual selections, line ranges, or the whole buffer.
+
+==============================================================================
+2. INSTALLATION                                     *multicursor-line-install*
+
+Using lazy.nvim: >lua
+    {
+        "iamcheyan/multicursor-line.nvim",
+        dependencies = { "jake-stewart/multicursor.nvim" },
+        config = function()
+            require("multicursor-line").setup({
+                prefix = "<leader>m",
+                default_mode = "head",
+                alternate_start = "tail",
+            })
+        end,
+    }
+<
+
+==============================================================================
+3. CONFIGURATION                                     *multicursor-line-config*
+
+Default configuration: >lua
+    require("multicursor-line").setup({
+        default_mode = "head",      -- "head" | "tail" | "alternate"
+        alternate_start = "tail",   -- "tail" | "head"
+        prefix = "<leader>m",       -- Starter keymap prefix
+        dynamic_layer = true,       -- Bind <C-n> and <M-C-n> only during active session
+        keymaps = {
+            step = "<C-n>",
+            select_all = "<M-C-n>",
+            standalone_step = false,
+        },
+    })
+<
+
+==============================================================================
+4. MODES                                               *multicursor-line-modes*
+
+• Head Mode ("head"):
+  Places cursors at the first column of each target line.
+  Example:
+      |aaa
+      |bbb
+      |ccc
+
+• Tail Mode ("tail"):
+  Places cursors at the last column of each target line.
+  Example:
+      aaa|
+      bbb|
+      ccc|
+
+• Alternate Mode ("alternate"):
+  Alternates cursor positions between Tail and Head (or vice versa).
+  Example:
+      aaa|
+      |bbb
+      ccc|
+      |ddd
+
+==============================================================================
+5. COMMANDS                                         *multicursor-line-commands*
+
+:McLineHead [range]        Start head mode (step 1)
+:McLineHeadAll [range]     Select all line heads in range
+:McLineTail [range]        Start tail mode (step 1)
+:McLineTailAll [range]     Select all line tails in range
+:McLineAlt [range]         Start alternate mode (step 1)
+:McLineAltAll [range]      Select all alternate positions in range
+:McLineClear               Clear active session and cursors
+
+==============================================================================
+6. LUA API                                               *multicursor-line-api*
+
+require("multicursor-line").step(mode?, range?)
+    Step and append next cursor.
+
+require("multicursor-line").select_all(mode?, range?)
+    Select all lines instantaneously.
+
+require("multicursor-line").start(mode, range?)
+    Start a fresh session in the specified mode.
+
+require("multicursor-line").clear()
+    Clear session and cursors.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
