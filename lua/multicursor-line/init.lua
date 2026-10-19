@@ -1,12 +1,14 @@
 local M = {}
 
----@alias McLineMode "head" | "tail" | "alternate"
+---@alias McLineMode "head" | "bol" | "tail" | "alternate" | "alternate_bol"
 ---@alias McBackend "vm" | "multicursor"
 
 ---@class McLineKeymaps
 ---@field head string
+---@field bol string
 ---@field tail string
 ---@field alternate string
+---@field alternate_bol string
 
 ---@class McLineConfig
 ---@field backend "auto" | "vm" | "multicursor"
@@ -21,14 +23,18 @@ local default_config = {
     alternate_start = "tail",
     create_keymaps = true,
     visual_keys = {
-        head = "<leader>h",
-        tail = "<leader>t",
-        alternate = "<leader>a",
+        head = "<leader>h",           -- 每行首个非空字符前（跳过缩进）
+        bol = "<leader>H",            -- 绝对行首（第 0 列，包含缩进）
+        tail = "<leader>t",           -- 行尾
+        alternate = "<leader>a",       -- 首尾交替（智能首字符前 <-> 行尾）
+        alternate_bol = "<leader>A",   -- 首尾交替（绝对行首 <-> 行尾）
     },
     normal_keys = {
         head = "<leader>mh",
+        bol = "<leader>mH",
         tail = "<leader>mt",
         alternate = "<leader>ma",
+        alternate_bol = "<leader>mA",
     },
 }
 
@@ -88,9 +94,9 @@ end
 function M.is_tail_line(mode, line_index)
     if mode == "tail" then
         return true
-    elseif mode == "head" then
+    elseif mode == "head" or mode == "bol" then
         return false
-    elseif mode == "alternate" then
+    elseif mode == "alternate" or mode == "alternate_bol" then
         if M.config.alternate_start == "tail" then
             return (line_index % 2 == 1)
         else
@@ -98,6 +104,27 @@ function M.is_tail_line(mode, line_index)
         end
     end
     return false
+end
+
+---Calculate head column for a line
+---@param mode McLineMode
+---@param line_str string
+---@param is_block boolean
+---@param s_col integer 0-indexed block left edge
+---@return integer col 0-indexed
+function M.get_head_column(mode, line_str, is_block, s_col)
+    local len = #line_str
+    local max_col = math.max(0, len - 1)
+    if is_block then
+        return math.min(s_col, max_col)
+    end
+    if mode == "bol" or mode == "alternate_bol" then
+        return 0
+    else
+        -- "head" / "alternate": first non-blank character
+        local indent = line_str:match("^%s*") or ""
+        return math.min(#indent, max_col)
+    end
 end
 
 ---Apply multi-cursor mode to current selection or range
@@ -168,8 +195,8 @@ function M.apply(mode, opts)
                     table.insert(tail_eol_region_indices, #vim.b.VM_Selection.Regions - 1)
                 end
             else
-                -- Head: position at line start or block left edge
-                local col = is_block and math.min(s_col, math.max(0, len - 1)) or 0
+                -- Head: position at first non-blank or column 0
+                local col = M.get_head_column(mode, line_str, is_block, s_col)
                 vim.api.nvim_win_set_cursor(0, { l, col })
                 vim.fn["vm#commands#add_cursor_at_pos"](0)
             end
@@ -218,7 +245,7 @@ function M.apply(mode, opts)
                         col_1_indexed = len + 1
                     end
                 else
-                    col_1_indexed = is_block and (math.min(s_col, math.max(0, len - 1)) + 1) or 1
+                    col_1_indexed = M.get_head_column(mode, line_str, is_block, s_col) + 1
                 end
 
                 if l == s_line then
@@ -233,7 +260,14 @@ function M.apply(mode, opts)
         end)
     end
 
-    local title = mode == "head" and "行首" or (mode == "tail" and "行尾" or "首尾交替")
+    local title_map = {
+        head = "首字符前",
+        bol = "绝对行首",
+        tail = "行尾",
+        alternate = "首尾交替(首字符前)",
+        alternate_bol = "首尾交替(绝对行首)",
+    }
+    local title = title_map[mode] or mode
     local count = e_line - s_line + 1
     vim.api.nvim_echo({
         { string.format("-- 多光标 [%s] (%d 行) -- ", title, count), "ModeMsg" },
@@ -241,10 +275,16 @@ function M.apply(mode, opts)
     }, false, {})
 end
 
----Head mode (行首加光标)
+---Head mode (每行首个非空字符前，跳过缩进)
 ---@param opts? { line1?: integer, line2?: integer }
 function M.head(opts)
     M.apply("head", opts)
+end
+
+---BOL mode (绝对行首第 0 列，包含缩进)
+---@param opts? { line1?: integer, line2?: integer }
+function M.bol(opts)
+    M.apply("bol", opts)
 end
 
 ---Tail mode (行尾加光标)
@@ -253,10 +293,16 @@ function M.tail(opts)
     M.apply("tail", opts)
 end
 
----Alternate mode (首尾交替加光标)
+---Alternate mode (智能首尾交替：首字符前 <-> 行尾)
 ---@param opts? { line1?: integer, line2?: integer }
 function M.alternate(opts)
     M.apply("alternate", opts)
+end
+
+---Alternate BOL mode (绝对首尾交替：绝对行首 <-> 行尾)
+---@param opts? { line1?: integer, line2?: integer }
+function M.alternate_bol(opts)
+    M.apply("alternate_bol", opts)
 end
 
 ---Backward compatibility helper
@@ -271,7 +317,11 @@ end
 local function register_commands()
     vim.api.nvim_create_user_command("McLineHead", function(opts)
         M.apply("head", { line1 = opts.line1, line2 = opts.line2 })
-    end, { range = true, desc = "多光标: 行首加光标" })
+    end, { range = true, desc = "多光标: 每行首个字符前加光标（跳过缩进）" })
+
+    vim.api.nvim_create_user_command("McLineBol", function(opts)
+        M.apply("bol", { line1 = opts.line1, line2 = opts.line2 })
+    end, { range = true, desc = "多光标: 绝对行首第 0 列加光标（包含缩进）" })
 
     vim.api.nvim_create_user_command("McLineTail", function(opts)
         M.apply("tail", { line1 = opts.line1, line2 = opts.line2 })
@@ -279,7 +329,11 @@ local function register_commands()
 
     vim.api.nvim_create_user_command("McLineAlt", function(opts)
         M.apply("alternate", { line1 = opts.line1, line2 = opts.line2 })
-    end, { range = true, desc = "多光标: 首尾交替加光标" })
+    end, { range = true, desc = "多光标: 首尾交替（首字符前 <-> 行尾）" })
+
+    vim.api.nvim_create_user_command("McLineAltBol", function(opts)
+        M.apply("alternate_bol", { line1 = opts.line1, line2 = opts.line2 })
+    end, { range = true, desc = "多光标: 首尾交替（绝对行首 <-> 行尾）" })
 
     vim.api.nvim_create_user_command("McLineClear", function()
         M.clear()
@@ -309,31 +363,58 @@ function M.setup(opts)
     local v = M.config.visual_keys
     local n = M.config.normal_keys
 
-    -- Visual Mode mappings (快速 2 键触发)
+    -- Visual Mode mappings (快速触发)
+    -- 1. 首字符前（智能代码首，跳过缩进）
     if v.head and v.head ~= "" then
-        set("x", v.head, function() M.apply("head") end, { desc = "多光标: 选区行首/左边缘加光标" })
+        set("x", v.head, function() M.apply("head") end, { desc = "多光标: 每行首字符前加光标（跳过缩进）" })
     end
+    set("x", "<leader>i", function() M.apply("head") end, { desc = "多光标: 每行首字符前加光标（跳过缩进）" })
+
+    -- 2. 绝对行首（第 0 列，包含缩进）
+    if v.bol and v.bol ~= "" then
+        set("x", v.bol, function() M.apply("bol") end, { desc = "多光标: 绝对行首加光标（第 0 列）" })
+    end
+    set("x", "<leader>0", function() M.apply("bol") end, { desc = "多光标: 绝对行首加光标（第 0 列）" })
+
+    -- 3. 行尾
     if v.tail and v.tail ~= "" then
-        set("x", v.tail, function() M.apply("tail") end, { desc = "多光标: 选区行尾/右边缘加光标" })
-    end
-    if v.alternate and v.alternate ~= "" then
-        set("x", v.alternate, function() M.apply("alternate") end, { desc = "多光标: 选区首尾/左右交替加光标" })
+        set("x", v.tail, function() M.apply("tail") end, { desc = "多光标: 选区行尾加光标" })
     end
 
-    -- Visual Mode 别名（兼容 <leader>m 助记分组）
-    set("x", "<leader>mh", function() M.apply("head") end, { desc = "多光标: 选区行首加光标" })
+    -- 4. 首尾交替（智能首字符前 <-> 行尾）
+    if v.alternate and v.alternate ~= "" then
+        set("x", v.alternate, function() M.apply("alternate") end, { desc = "多光标: 选区首尾交替（首字符前 <-> 行尾）" })
+    end
+
+    -- 5. 首尾交替（绝对行首 <-> 行尾）
+    if v.alternate_bol and v.alternate_bol ~= "" then
+        set("x", v.alternate_bol, function() M.apply("alternate_bol") end, { desc = "多光标: 选区首尾交替（绝对行首 <-> 行尾）" })
+    end
+
+    -- Visual Mode 助记分组 (<leader>m...)
+    set("x", "<leader>mh", function() M.apply("head") end, { desc = "多光标: 每行首字符前加光标" })
+    set("x", "<leader>mi", function() M.apply("head") end, { desc = "多光标: 每行首字符前加光标" })
+    set("x", "<leader>mH", function() M.apply("bol") end, { desc = "多光标: 绝对行首加光标" })
+    set("x", "<leader>m0", function() M.apply("bol") end, { desc = "多光标: 绝对行首加光标" })
     set("x", "<leader>mt", function() M.apply("tail") end, { desc = "多光标: 选区行尾加光标" })
-    set("x", "<leader>ma", function() M.apply("alternate") end, { desc = "多光标: 选区首尾交替加光标" })
+    set("x", "<leader>ma", function() M.apply("alternate") end, { desc = "多光标: 首尾交替（首字符前）" })
+    set("x", "<leader>mA", function() M.apply("alternate_bol") end, { desc = "多光标: 首尾交替（绝对行首）" })
 
     -- Normal Mode mappings (支持数字前缀例如 5<leader>mh)
     if n.head and n.head ~= "" then
-        set("n", n.head, function() M.apply("head") end, { desc = "多光标: 行首加光标" })
+        set("n", n.head, function() M.apply("head") end, { desc = "多光标: 首字符前加光标" })
+    end
+    if n.bol and n.bol ~= "" then
+        set("n", n.bol, function() M.apply("bol") end, { desc = "多光标: 绝对行首加光标" })
     end
     if n.tail and n.tail ~= "" then
         set("n", n.tail, function() M.apply("tail") end, { desc = "多光标: 行尾加光标" })
     end
     if n.alternate and n.alternate ~= "" then
-        set("n", n.alternate, function() M.apply("alternate") end, { desc = "多光标: 首尾交替加光标" })
+        set("n", n.alternate, function() M.apply("alternate") end, { desc = "多光标: 首尾交替（首字符前）" })
+    end
+    if n.alternate_bol and n.alternate_bol ~= "" then
+        set("n", n.alternate_bol, function() M.apply("alternate_bol") end, { desc = "多光标: 首尾交替（绝对行首）" })
     end
 end
 

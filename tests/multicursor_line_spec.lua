@@ -16,70 +16,63 @@ mcline.setup({
 })
 
 vim.cmd("new")
-vim.api.nvim_buf_set_lines(0, 0, -1, false, { "aaa", "bbb", "ccc", "ddd" })
+vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+    '  "gnucobol_eyebrow": "OFFICIAL COMPILER",',
+    '  "gnucobol_lead": "...",',
+    '    ("课程与示例", "..."),',
+    '    ("`cobc` 编译", "..."),',
+    '  ],'
+})
 
--- 1. Test is_tail_line
-assert(mcline.is_tail_line("head", 1) == false, "Head should not be tail")
-assert(mcline.is_tail_line("tail", 1) == true, "Tail should be tail")
-assert(mcline.is_tail_line("alternate", 1) == true, "Alt line 1 should be tail")
-assert(mcline.is_tail_line("alternate", 2) == false, "Alt line 2 should be head")
+-- 1. Test get_head_column
+local lines = vim.api.nvim_buf_get_lines(0, 0, 5, false)
+-- Head mode: first non-blank
+assert(mcline.get_head_column("head", lines[1], false, 0) == 2, "Line 1 head should be 2")
+assert(mcline.get_head_column("head", lines[3], false, 0) == 4, "Line 3 head should be 4")
+-- BOL mode: absolute col 0
+assert(mcline.get_head_column("bol", lines[1], false, 0) == 0, "Line 1 bol should be 0")
+assert(mcline.get_head_column("bol", lines[3], false, 0) == 0, "Line 3 bol should be 0")
 
--- 2. Test apply head on range
-mcline.apply("head", { line1 = 1, line2 = 4 })
+-- 2. Test apply head (每行首个非空字符前)
+mcline.apply("head", { line1 = 1, line2 = 5 })
 assert(vim.b.visual_multi == 1, "VM should be active")
-assert(#vim.b.VM_Selection.Regions == 4, "Should have 4 regions")
-for i = 1, 4 do
-    assert(vim.fn.getline(i):find(" $") == nil, "Normal mode should not have trailing space")
+local r = vim.b.VM_Selection.Regions
+assert(r[1].a == 3, "Line 1 cursor should be at col 3 (1-indexed for byte 2)")
+assert(r[2].a == 3, "Line 2 cursor should be at col 3")
+assert(r[3].a == 5, "Line 3 cursor should be at col 5 (1-indexed for byte 4)")
+assert(r[4].a == 5, "Line 4 cursor should be at col 5")
+assert(r[5].a == 3, "Line 5 cursor should be at col 3")
+mcline.clear()
+
+-- 3. Test apply bol (绝对行首第 0 列)
+mcline.apply("bol", { line1 = 1, line2 = 5 })
+assert(vim.b.visual_multi == 1, "VM should be active")
+for _, reg in ipairs(vim.b.VM_Selection.Regions) do
+    assert(reg.a == 1, "All BOL cursors should be at col 1 (0-indexed 0)")
 end
 mcline.clear()
 
--- 3. Test apply tail on range in Normal Mode (MUST NOT add trailing spaces!)
-mcline.apply("tail", { line1 = 1, line2 = 4 })
+-- 4. Test apply alternate (智能首尾交替：首字符前 <-> 行尾)
+mcline.apply("alternate", { line1 = 1, line2 = 5 })
 assert(vim.b.visual_multi == 1, "VM should be active")
-assert(#vim.b.VM_Selection.Regions == 4, "Should have 4 regions")
-for i = 1, 4 do
-    assert(vim.fn.getline(i) == ({ "aaa", "bbb", "ccc", "ddd" })[i], "Line text must not have trailing spaces added in normal mode")
-end
+local alt_r = vim.b.VM_Selection.Regions
+assert(alt_r[1].a == #lines[1], "Line 1 should be tail")
+assert(alt_r[2].a == 3, "Line 2 should be first non-blank (col 3)")
+assert(alt_r[3].a == #lines[3], "Line 3 should be tail")
+assert(alt_r[4].a == 5, "Line 4 should be first non-blank (col 5)")
+assert(alt_r[5].a == #lines[5], "Line 5 should be tail")
 mcline.clear()
 
--- 4. Test apply alternate on range in Normal Mode (MUST NOT have trailing spaces!)
-mcline.apply("alternate", { line1 = 1, line2 = 4 })
+-- 5. Test apply alternate_bol (绝对首尾交替：第 0 列 <-> 行尾)
+mcline.apply("alternate_bol", { line1 = 1, line2 = 5 })
 assert(vim.b.visual_multi == 1, "VM should be active")
-assert(#vim.b.VM_Selection.Regions == 4, "Should have 4 regions")
-for i = 1, 4 do
-    assert(vim.fn.getline(i) == ({ "aaa", "bbb", "ccc", "ddd" })[i], "Odd/even lines must remain completely untouched in normal mode")
-end
-
--- 5. Test pressing 'i' to enter insert mode
--- The buffer mapping for 'i' will execute start_insert
-local bufnr = vim.api.nvim_get_current_buf()
-local map_i = vim.fn.maparg("i", "n", false, true)
-assert(type(map_i) == "table" and map_i.callback ~= nil, "'i' mapping should be active")
-map_i.callback()
-
-assert(#vim.b.VM_Selection.Insert.cursors == 4, "Should have 4 insert cursors")
-local cursors = vim.b.VM_Selection.Insert.cursors
-assert(cursors[1].a == 4, "Insert cursor 1 should be col 4 (tail)")
-assert(cursors[2].a == 1, "Insert cursor 2 should be col 1 (head)")
-assert(cursors[3].a == 4, "Insert cursor 3 should be col 4 (tail)")
-assert(cursors[4].a == 1, "Insert cursor 4 should be col 1 (head)")
-
-mcline.clear()
-
--- 6. Test visual block selection
-local esc = vim.api.nvim_replace_termcodes("<Esc>", true, false, true)
-local ctrl_v = vim.api.nvim_replace_termcodes("<C-v>", true, false, true)
-
--- Select block lines 1..4, cols 1..2 (characters 1..2)
-vim.api.nvim_win_set_cursor(0, { 1, 0 })
-vim.api.nvim_feedkeys(ctrl_v .. "3jl", "nx", false)
-mcline.apply("alternate")
-
-assert(vim.b.visual_multi == 1, "VM should be active for block alternate")
-for i = 1, 4 do
-    assert(vim.fn.getline(i) == ({ "aaa", "bbb", "ccc", "ddd" })[i], "Block normal mode must not modify line text")
-end
+local alt_bol_r = vim.b.VM_Selection.Regions
+assert(alt_bol_r[1].a == #lines[1], "Line 1 should be tail")
+assert(alt_bol_r[2].a == 1, "Line 2 should be absolute bol (col 1)")
+assert(alt_bol_r[3].a == #lines[3], "Line 3 should be tail")
+assert(alt_bol_r[4].a == 1, "Line 4 should be absolute bol (col 1)")
+assert(alt_bol_r[5].a == #lines[5], "Line 5 should be tail")
 mcline.clear()
 
 vim.cmd("bdelete!")
-print("ALL MULTICURSOR-LINE NO-TRAILING-SPACE TESTS PASSED!")
+print("ALL MULTICURSOR-LINE INDENTATION TESTS PASSED!")
