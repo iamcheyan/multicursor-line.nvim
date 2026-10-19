@@ -1,40 +1,24 @@
-local mc = require("multicursor-nvim")
-
 local M = {}
 
 ---@alias McLineMode "head" | "tail" | "alternate"
+---@alias McBackend "vm" | "multicursor"
 
 ---@class McLineState
----@field mode McLineMode Current active mode
----@field start_line integer Starting line number (1-indexed)
----@field end_line integer Target ending line number (1-indexed)
----@field current_line integer Current line index reached
----@field active boolean Whether a progressive session is active
----@field is_all_selected boolean Whether all lines are currently selected
-
----@class McLineKeymaps
----@field step? string|false Extra key for stepping (optional)
----@field step_back? string|false Extra key for stepping back (optional)
----@field toggle_all? string|false Extra key for toggling select all (optional)
+---@field mode McLineMode
+---@field min_line integer
+---@field max_line integer
+---@field count integer
 
 ---@class McLineConfig
----@field default_mode McLineMode Default mode ("head" | "tail" | "alternate")
----@field alternate_start "tail" | "head" Which position the 1st line takes in alternate mode (default: "tail")
----@field prefix string Keymap prefix for starter keys (default: "<leader>m")
----@field dynamic_layer boolean Whether to activate the interactive single-key layer (default: true)
----@field keymaps McLineKeymaps
+---@field backend "auto" | "vm" | "multicursor"
+---@field alternate_start "tail" | "head"
+---@field prefix string
 
 ---@type McLineConfig
 local default_config = {
-    default_mode = "head",
+    backend = "auto",
     alternate_start = "tail",
     prefix = "<leader>m",
-    dynamic_layer = true,
-    keymaps = {
-        step = false,
-        step_back = false,
-        toggle_all = false,
-    },
 }
 
 M.config = vim.deepcopy(default_config)
@@ -42,335 +26,262 @@ M.config = vim.deepcopy(default_config)
 ---@type McLineState|nil
 local state = nil
 
----Get current active state (read-only copy)
----@return McLineState|nil
-function M.get_state()
-    if not state then
-        return nil
+---Detect available multi-cursor engine
+---@return McBackend
+local function get_backend()
+    if M.config.backend == "vm" or M.config.backend == "multicursor" then
+        return M.config.backend
     end
-    return vim.deepcopy(state)
+    -- Auto detection: prefer vim-visual-multi for live real-time typing
+    if vim.fn.exists("*vm#commands#add_cursor_at_pos") == 1 or package.loaded["vim-visual-multi"] or vim.g.loaded_visual_multi then
+        return "vm"
+    end
+    local ok, _ = pcall(require, "multicursor-nvim")
+    if ok then
+        return "multicursor"
+    end
+    return "vm"
 end
 
----Check if a progressive session is currently active
----@return boolean
-function M.is_active()
-    return state ~= nil and state.active
-end
-
----Reset internal session state
+---Reset state
 function M.reset()
     state = nil
 end
 
----Calculate target column for a given line in the specified mode
+---Check if VM or multicursor has active cursors
+local function has_active_cursors()
+    local b = get_backend()
+    if b == "vm" then
+        return vim.b.visual_multi == 1
+    else
+        local ok, mc = pcall(require, "multicursor-nvim")
+        return ok and mc.hasCursors()
+    end
+end
+
+---Clear active cursors
+function M.clear()
+    M.reset()
+    local b = get_backend()
+    if b == "vm" then
+        if vim.b.visual_multi == 1 then
+            pcall(vim.fn["vm#reset"])
+        end
+    else
+        local ok, mc = pcall(require, "multicursor-nvim")
+        if ok and mc.hasCursors() then
+            mc.clearCursors()
+        end
+    end
+end
+
+---Calculate column for a line
 ---@param mode McLineMode
----@param line_nr integer 1-indexed line number
----@param line_index integer 1-indexed relative line index within target range
----@return integer col 1-indexed byte column
-function M.get_col_for_line(mode, line_nr, line_index)
+---@param line_nr integer 1-indexed
+---@param line_index integer 1-indexed
+---@return integer col_0_indexed 0-indexed column
+function M.get_col(mode, line_nr, line_index)
     local line_str = vim.api.nvim_buf_get_lines(0, line_nr - 1, line_nr, true)[1] or ""
-    local max_col = math.max(1, #line_str)
+    local max_col = math.max(0, #line_str - 1)
 
     if mode == "head" then
-        return 1
+        return 0
     elseif mode == "tail" then
         return max_col
     elseif mode == "alternate" then
         local is_tail
         if M.config.alternate_start == "tail" then
-            is_tail = (line_index % 2 == 1) -- 1: tail, 2: head, 3: tail, 4: head ...
+            is_tail = (line_index % 2 == 1)
         else
-            is_tail = (line_index % 2 == 0) -- 1: head, 2: tail, 3: head, 4: tail ...
+            is_tail = (line_index % 2 == 0)
         end
-        return is_tail and max_col or 1
+        return is_tail and max_col or 0
     end
-    return 1
+    return 0
 end
 
----Resolve target line range based on options or current editor context
----@param opts? { start_line?: integer, end_line?: integer }
----@return integer start_line, integer end_line
-local function resolve_range(opts)
-    opts = opts or {}
-    if opts.start_line and opts.end_line then
-        return math.min(opts.start_line, opts.end_line), math.max(opts.start_line, opts.end_line)
-    end
-
-    local mode = vim.fn.mode()
-    -- Visual mode range
-    if mode:match("[vV\22]") then
-        local vpos = vim.fn.getpos("v")
-        local curpos = vim.fn.getpos(".")
-        -- Exit visual mode to normal mode cleanly
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
-        local s = math.min(vpos[2], curpos[2])
-        local e = math.max(vpos[2], curpos[2])
-        return s, e
-    end
-
-    local cur_line = vim.fn.line(".")
-    local total_lines = vim.fn.line("$")
-
-    -- If count was provided (e.g. 5:McLineHead or 5<leader>mh)
-    if vim.v.count > 0 then
-        return cur_line, math.min(total_lines, cur_line + vim.v.count - 1)
-    end
-
-    -- Default: from current line to buffer end
-    return cur_line, total_lines
-end
-
----Switch active mode
----@param mode McLineMode
-function M.set_mode(mode)
-    if mode ~= "head" and mode ~= "tail" and mode ~= "alternate" then
-        error("multicursor-line: Invalid mode: " .. tostring(mode))
-    end
-    if state then
-        state.mode = mode
+---Add a cursor at line and 0-indexed column
+---@param line integer 1-indexed
+---@param col integer 0-indexed
+local function add_cursor_at(line, col)
+    local b = get_backend()
+    if b == "vm" then
+        vim.api.nvim_win_set_cursor(0, { line, col })
+        vim.fn["vm#commands#add_cursor_at_pos"](0)
     else
-        M.config.default_mode = mode
-    end
-end
-
----Progressively append next line cursor down (corresponding to n or j)
----@param mode? McLineMode
----@param range? { start_line?: integer, end_line?: integer }
-function M.step(mode, range)
-    -- 1. Initialize session if not active
-    if not state or not state.active then
-        local s_line, e_line = resolve_range(range)
-        local cur_mode = mode or (state and state.mode) or M.config.default_mode
-
-        if mc.hasCursors() then
-            mc.clearCursors()
-        end
-
-        state = {
-            mode = cur_mode,
-            start_line = s_line,
-            end_line = e_line,
-            current_line = s_line,
-            active = true,
-            is_all_selected = false,
-        }
-
+        local mc = require("multicursor-nvim")
         mc.action(function(ctx)
-            local main = ctx:mainCursor()
-            local col = M.get_col_for_line(state.mode, state.start_line, 1)
-            main:setPos({ state.start_line, col })
-        end)
-        return
-    end
-
-    if state.is_all_selected then
-        vim.notify("multicursor-line: All lines already selected (press A to toggle)", vim.log.levels.INFO)
-        return
-    end
-
-    -- 2. Check if reached boundary
-    if state.current_line >= state.end_line then
-        vim.notify("multicursor-line: Reached the end of target lines", vim.log.levels.INFO)
-        return
-    end
-
-    -- 3. Append cursor at next line
-    local next_line = state.current_line + 1
-    local line_idx = next_line - state.start_line + 1
-    local col = M.get_col_for_line(state.mode, next_line, line_idx)
-
-    mc.action(function(ctx)
-        local new_cur = ctx:addCursor()
-        new_cur:setPos({ next_line, col })
-        new_cur:select()
-    end)
-
-    state.current_line = next_line
-    if state.current_line == state.end_line then
-        state.is_all_selected = true
-    end
-end
-
----Step backward / remove the last added cursor (corresponding to p or k)
-function M.step_back()
-    if not state or not state.active then
-        return
-    end
-
-    if state.is_all_selected then
-        state.is_all_selected = false
-    end
-
-    if state.current_line > state.start_line then
-        mc.action(function(ctx)
-            ctx:mainCursor():delete()
-        end)
-        state.current_line = state.current_line - 1
-    else
-        vim.notify("multicursor-line: At the first line", vim.log.levels.INFO)
-    end
-end
-
----Cancel select-all and revert to a single cursor at start_line
-function M.cancel_select_all()
-    if not state then
-        return
-    end
-
-    if mc.hasCursors() then
-        mc.clearCursors()
-    end
-
-    mc.action(function(ctx)
-        local main = ctx:mainCursor()
-        local col = M.get_col_for_line(state.mode, state.start_line, 1)
-        main:setPos({ state.start_line, col })
-    end)
-
-    state.current_line = state.start_line
-    state.is_all_selected = false
-end
-
----Select all lines in range at target positions instantaneously
----@param mode? McLineMode
----@param range? { start_line?: integer, end_line?: integer }
-function M.select_all(mode, range)
-    local s_line, e_line
-    if state and state.active and not range then
-        s_line = state.start_line
-        e_line = state.end_line
-    else
-        s_line, e_line = resolve_range(range)
-    end
-
-    local cur_mode = mode or (state and state.mode) or M.config.default_mode
-
-    if mc.hasCursors() then
-        mc.clearCursors()
-    end
-
-    mc.action(function(ctx)
-        local main = ctx:mainCursor()
-        local line_idx = 1
-        for l = s_line, e_line do
-            local col = M.get_col_for_line(cur_mode, l, line_idx)
-            if l == s_line then
-                main:setPos({ l, col })
+            if not mc.hasCursors() then
+                local main = ctx:mainCursor()
+                main:setPos({ line, col + 1 })
             else
                 local cur = ctx:addCursor()
-                cur:setPos({ l, col })
+                cur:setPos({ line, col + 1 })
+                cur:select()
             end
-            line_idx = line_idx + 1
-        end
-    end)
-
-    state = {
-        mode = cur_mode,
-        start_line = s_line,
-        end_line = e_line,
-        current_line = e_line,
-        active = true,
-        is_all_selected = true,
-    }
+        end)
+    end
 end
 
----Toggle select-all: if all lines selected, cancel back to line 1; otherwise select all
-function M.toggle_all()
-    if not state or not state.active then
-        M.select_all()
+---Add cursor down (向下选)
+---@param mode McLineMode
+function M.step_down(mode)
+    local total = vim.fn.line("$")
+    if not state or not has_active_cursors() then
+        local cur = vim.fn.line(".")
+        local c1 = M.get_col(mode, cur, 1)
+        add_cursor_at(cur, c1)
+
+        local next_line = math.min(total, cur + 1)
+        if next_line > cur then
+            local c2 = M.get_col(mode, next_line, 2)
+            add_cursor_at(next_line, c2)
+            state = { mode = mode, min_line = cur, max_line = next_line, count = 2 }
+        else
+            state = { mode = mode, min_line = cur, max_line = cur, count = 1 }
+        end
         return
     end
 
-    if state.is_all_selected then
-        M.cancel_select_all()
-    else
-        M.select_all(state.mode)
+    if state.max_line >= total then
+        vim.notify("multicursor-line: 已到文件末尾", vim.log.levels.INFO)
+        return
     end
+
+    state.max_line = state.max_line + 1
+    state.count = state.count + 1
+    local c = M.get_col(state.mode, state.max_line, state.count)
+    add_cursor_at(state.max_line, c)
 end
 
----Start a mode and trigger the first cursor
+---Add cursor up (向上选)
 ---@param mode McLineMode
----@param range? { start_line?: integer, end_line?: integer }
-function M.start(mode, range)
-    M.reset()
-    M.step(mode, range)
+function M.step_up(mode)
+    if not state or not has_active_cursors() then
+        local cur = vim.fn.line(".")
+        local c1 = M.get_col(mode, cur, 1)
+        add_cursor_at(cur, c1)
+
+        local prev_line = math.max(1, cur - 1)
+        if prev_line < cur then
+            local c2 = M.get_col(mode, prev_line, 2)
+            add_cursor_at(prev_line, c2)
+            state = { mode = mode, min_line = prev_line, max_line = cur, count = 2 }
+        else
+            state = { mode = mode, min_line = cur, max_line = cur, count = 1 }
+        end
+        return
+    end
+
+    if state.min_line <= 1 then
+        vim.notify("multicursor-line: 已到文件起始行", vim.log.levels.INFO)
+        return
+    end
+
+    state.min_line = state.min_line - 1
+    state.count = state.count + 1
+    local c = M.get_col(state.mode, state.min_line, state.count)
+    add_cursor_at(state.min_line, c)
 end
 
----Clear all cursors and reset session state
-function M.clear()
-    M.reset()
-    if mc.hasCursors() then
-        mc.clearCursors()
+---Select all lines in range
+---@param mode McLineMode
+---@param s_line? integer
+---@param e_line? integer
+function M.select_all(mode, s_line, e_line)
+    if not s_line or not e_line then
+        local vmode = vim.fn.mode()
+        if vmode:match("[vV\22]") then
+            local vpos = vim.fn.getpos("v")
+            local curpos = vim.fn.getpos(".")
+            vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", false)
+            s_line = math.min(vpos[2], curpos[2])
+            e_line = math.max(vpos[2], curpos[2])
+        else
+            -- Normal mode: from current line to buffer end (or whole buffer if count is 0)
+            s_line = vim.fn.line(".")
+            e_line = vim.fn.line("$")
+        end
     end
+
+    M.clear()
+
+    local b = get_backend()
+    if b == "vm" then
+        local idx = 1
+        for l = s_line, e_line do
+            local c = M.get_col(mode, l, idx)
+            add_cursor_at(l, c)
+            idx = idx + 1
+        end
+    else
+        local mc = require("multicursor-nvim")
+        mc.action(function(ctx)
+            local main = ctx:mainCursor()
+            local idx = 1
+            for l = s_line, e_line do
+                local c = M.get_col(mode, l, idx)
+                if l == s_line then
+                    main:setPos({ l, c + 1 })
+                else
+                    local cur = ctx:addCursor()
+                    cur:setPos({ l, c + 1 })
+                end
+                idx = idx + 1
+            end
+        end)
+    end
+
+    state = { mode = mode, min_line = s_line, max_line = e_line, count = e_line - s_line + 1 }
 end
 
 ---Register user commands
 local function register_commands()
-    -- :McLine [head|tail|alternate] [step|all|toggle]
-    vim.api.nvim_create_user_command("McLine", function(opts)
-        local args = vim.split(opts.args, "%s+", { trimempty = true })
-        local mode = args[1]
-        local action = args[2] or "step"
-        local range = nil
-        if opts.range == 2 then
-            range = { start_line = opts.line1, end_line = opts.line2 }
-        end
-
-        if action == "all" then
-            M.select_all(mode, range)
-        elseif action == "toggle" then
-            M.toggle_all()
-        else
-            M.step(mode, range)
-        end
-    end, {
-        range = true,
-        nargs = "*",
-        complete = function(_, cmd_line)
-            local parts = vim.split(cmd_line, "%s+")
-            if #parts <= 2 then
-                return { "head", "tail", "alternate" }
-            elseif #parts == 3 then
-                return { "step", "all", "toggle" }
-            end
-            return {}
-        end,
-        desc = "Multicursor line generator (head/tail/alternate)",
-    })
-
+    -- :McLineHead [down|up|all]
     vim.api.nvim_create_user_command("McLineHead", function(opts)
-        local r = opts.range == 2 and { start_line = opts.line1, end_line = opts.line2 } or nil
-        M.start("head", r)
-    end, { range = true, desc = "Start line-head mode" })
+        local action = opts.args ~= "" and opts.args or (opts.range == 2 and "all" or "down")
+        if action == "all" then
+            local s = opts.range == 2 and opts.line1 or nil
+            local e = opts.range == 2 and opts.line2 or nil
+            M.select_all("head", s, e)
+        elseif action == "up" then
+            M.step_up("head")
+        else
+            M.step_down("head")
+        end
+    end, { range = true, nargs = "?" })
 
-    vim.api.nvim_create_user_command("McLineHeadAll", function(opts)
-        local r = opts.range == 2 and { start_line = opts.line1, end_line = opts.line2 } or nil
-        M.select_all("head", r)
-    end, { range = true, desc = "Select all line heads" })
-
+    -- :McLineTail [down|up|all]
     vim.api.nvim_create_user_command("McLineTail", function(opts)
-        local r = opts.range == 2 and { start_line = opts.line1, end_line = opts.line2 } or nil
-        M.start("tail", r)
-    end, { range = true, desc = "Start line-tail mode" })
+        local action = opts.args ~= "" and opts.args or (opts.range == 2 and "all" or "down")
+        if action == "all" then
+            local s = opts.range == 2 and opts.line1 or nil
+            local e = opts.range == 2 and opts.line2 or nil
+            M.select_all("tail", s, e)
+        elseif action == "up" then
+            M.step_up("tail")
+        else
+            M.step_down("tail")
+        end
+    end, { range = true, nargs = "?" })
 
-    vim.api.nvim_create_user_command("McLineTailAll", function(opts)
-        local r = opts.range == 2 and { start_line = opts.line1, end_line = opts.line2 } or nil
-        M.select_all("tail", r)
-    end, { range = true, desc = "Select all line tails" })
-
+    -- :McLineAlt [down|up|all]
     vim.api.nvim_create_user_command("McLineAlt", function(opts)
-        local r = opts.range == 2 and { start_line = opts.line1, end_line = opts.line2 } or nil
-        M.start("alternate", r)
-    end, { range = true, desc = "Start alternating head/tail mode" })
-
-    vim.api.nvim_create_user_command("McLineAltAll", function(opts)
-        local r = opts.range == 2 and { start_line = opts.line1, end_line = opts.line2 } or nil
-        M.select_all("alternate", r)
-    end, { range = true, desc = "Select all alternating head/tail" })
+        local action = opts.args ~= "" and opts.args or (opts.range == 2 and "all" or "down")
+        if action == "all" then
+            local s = opts.range == 2 and opts.line1 or nil
+            local e = opts.range == 2 and opts.line2 or nil
+            M.select_all("alternate", s, e)
+        elseif action == "up" then
+            M.step_up("alternate")
+        else
+            M.step_down("alternate")
+        end
+    end, { range = true, nargs = "?" })
 
     vim.api.nvim_create_user_command("McLineClear", function()
         M.clear()
-    end, { desc = "Clear multicursor line session" })
+    end, {})
 end
 
 ---Setup plugin
@@ -379,111 +290,23 @@ function M.setup(opts)
     M.config = vim.tbl_deep_extend("force", default_config, opts or {})
     register_commands()
 
-    local augroup = vim.api.nvim_create_augroup("MulticursorLineSession", { clear = true })
-
-    -- Reset state if buffer or window changes
-    vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
-        group = augroup,
-        callback = function()
-            M.reset()
-        end,
-    })
-
-    -- When entering insert mode, complete session setup so j/k/n/p return to normal afterwards
-    vim.api.nvim_create_autocmd("ModeChanged", {
-        group = augroup,
-        pattern = "*:i*",
-        callback = function()
-            if state and state.active then
-                state.active = false
-            end
-        end,
-    })
-
     local set = vim.keymap.set
-    local prefix = M.config.prefix
+    local p = M.config.prefix
 
-    -- Starter keybindings
-    if prefix and prefix ~= "" then
-        set({ "n", "x" }, prefix .. "h", function() M.start("head") end, { desc = "MC-Line: Head mode" })
-        set({ "n", "x" }, prefix .. "t", function() M.start("tail") end, { desc = "MC-Line: Tail mode" })
-        set({ "n", "x" }, prefix .. "a", function() M.start("alternate") end, { desc = "MC-Line: Alternate mode" })
+    -- 1. 行首模式 (Head)
+    set("n", p .. "j", function() M.step_down("head") end, { desc = "行首: 向下加一行光标" })
+    set("n", p .. "k", function() M.step_up("head") end, { desc = "行首: 向上加一行光标" })
+    set({ "n", "x" }, p .. "h", function() M.select_all("head") end, { desc = "行首: 全选 (选区或全段)" })
 
-        set({ "n", "x" }, prefix .. "H", function() M.select_all("head") end, { desc = "MC-Line: Select all heads" })
-        set({ "n", "x" }, prefix .. "T", function() M.select_all("tail") end, { desc = "MC-Line: Select all tails" })
-        set({ "n", "x" }, prefix .. "A", function() M.select_all("alternate") end, { desc = "MC-Line: Select all alternate" })
-    end
+    -- 2. 行尾模式 (Tail)
+    set("n", p .. "l", function() M.step_down("tail") end, { desc = "行尾: 向下加一行光标" })
+    set("n", p .. "L", function() M.step_up("tail") end, { desc = "行尾: 向上加一行光标" })
+    set({ "n", "x" }, p .. "t", function() M.select_all("tail") end, { desc = "行尾: 全选 (选区或全段)" })
 
-    -- Interactive dynamic layer: single-key navigation during active line session
-    if M.config.dynamic_layer then
-        mc.addKeymapLayer(function(layerSet)
-            -- Step down: n or j
-            layerSet({ "n", "x" }, "j", function()
-                if state and state.active then
-                    M.step()
-                else
-                    vim.cmd("normal! j")
-                end
-            end)
-            layerSet({ "n", "x" }, "n", function()
-                if state and state.active then
-                    M.step()
-                else
-                    vim.cmd("normal! n")
-                end
-            end)
-
-            -- Step back / up: k or p
-            layerSet({ "n", "x" }, "k", function()
-                if state and state.active then
-                    M.step_back()
-                else
-                    vim.cmd("normal! k")
-                end
-            end)
-            layerSet({ "n", "x" }, "p", function()
-                if state and state.active then
-                    M.step_back()
-                else
-                    vim.cmd("normal! p")
-                end
-            end)
-
-            -- Toggle select-all: A
-            layerSet({ "n", "x" }, "A", function()
-                if state and state.active then
-                    M.toggle_all()
-                else
-                    vim.cmd("normal! A")
-                end
-            end)
-
-            -- Cancel session
-            layerSet({ "n", "x" }, "q", function()
-                M.clear()
-            end)
-            layerSet("n", "<Esc>", function()
-                M.clear()
-            end)
-
-            -- Optional extra keybindings if user explicitly configured them
-            if M.config.keymaps.step then
-                layerSet({ "n", "x" }, M.config.keymaps.step, function()
-                    M.step()
-                end)
-            end
-            if M.config.keymaps.step_back then
-                layerSet({ "n", "x" }, M.config.keymaps.step_back, function()
-                    M.step_back()
-                end)
-            end
-            if M.config.keymaps.toggle_all then
-                layerSet({ "n", "x" }, M.config.keymaps.toggle_all, function()
-                    M.toggle_all()
-                end)
-            end
-        end)
-    end
+    -- 3. 首尾交替模式 (Alternate)
+    set("n", p .. "n", function() M.step_down("alternate") end, { desc = "交替: 向下加一行光标" })
+    set("n", p .. "p", function() M.step_up("alternate") end, { desc = "交替: 向上加一行光标" })
+    set({ "n", "x" }, p .. "a", function() M.select_all("alternate") end, { desc = "交替: 全选 (选区或全段)" })
 end
 
 return M
