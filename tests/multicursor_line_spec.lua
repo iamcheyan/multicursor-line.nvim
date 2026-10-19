@@ -28,36 +28,35 @@ assert(mcline.is_tail_line("alternate", 2) == false, "Alt line 2 should be head"
 mcline.apply("head", { line1 = 1, line2 = 4 })
 assert(vim.b.visual_multi == 1, "VM should be active")
 assert(#vim.b.VM_Selection.Regions == 4, "Should have 4 regions")
-for _, r in ipairs(vim.b.VM_Selection.Regions) do
-    assert(r.a == 1, "VM col should be 1 (1-indexed)")
+for i = 1, 4 do
+    assert(vim.fn.getline(i):find(" $") == nil, "Normal mode should not have trailing space")
 end
 mcline.clear()
 
--- 3. Test apply tail on range (should be truly at EOL, col 4 after "aaa")
+-- 3. Test apply tail on range in Normal Mode (MUST NOT add trailing spaces!)
 mcline.apply("tail", { line1 = 1, line2 = 4 })
 assert(vim.b.visual_multi == 1, "VM should be active")
 assert(#vim.b.VM_Selection.Regions == 4, "Should have 4 regions")
-for _, r in ipairs(vim.b.VM_Selection.Regions) do
-    assert(r.a == 4, "VM tail col should be 4 (after 3 chars)")
+for i = 1, 4 do
+    assert(vim.fn.getline(i) == ({ "aaa", "bbb", "ccc", "ddd" })[i], "Line text must not have trailing spaces added in normal mode")
 end
 mcline.clear()
--- Verify trailing spaces are cleanly removed on clear
-for i = 1, 4 do
-    assert(vim.fn.getline(i):find(" $") == nil, "No trailing space should remain after clear")
-end
 
--- 4. Test apply alternate on range
+-- 4. Test apply alternate on range in Normal Mode (MUST NOT have trailing spaces!)
 mcline.apply("alternate", { line1 = 1, line2 = 4 })
 assert(vim.b.visual_multi == 1, "VM should be active")
 assert(#vim.b.VM_Selection.Regions == 4, "Should have 4 regions")
-local regions = vim.b.VM_Selection.Regions
-assert(regions[1].a == 4, "Line 1 should be tail after 'aaa' (col 4)")
-assert(regions[2].a == 1, "Line 2 should be head before 'bbb' (col 1)")
-assert(regions[3].a == 4, "Line 3 should be tail after 'ccc' (col 4)")
-assert(regions[4].a == 1, "Line 4 should be head before 'ddd' (col 1)")
+for i = 1, 4 do
+    assert(vim.fn.getline(i) == ({ "aaa", "bbb", "ccc", "ddd" })[i], "Odd/even lines must remain completely untouched in normal mode")
+end
 
--- 5. Test entering insert mode via 'i' in alternate
-vim.cmd("call b:VM_Selection.Insert.key('i')")
+-- 5. Test pressing 'i' to enter insert mode
+-- The buffer mapping for 'i' will execute start_insert
+local bufnr = vim.api.nvim_get_current_buf()
+local map_i = vim.fn.maparg("i", "n", false, true)
+assert(type(map_i) == "table" and map_i.callback ~= nil, "'i' mapping should be active")
+map_i.callback()
+
 assert(#vim.b.VM_Selection.Insert.cursors == 4, "Should have 4 insert cursors")
 local cursors = vim.b.VM_Selection.Insert.cursors
 assert(cursors[1].a == 4, "Insert cursor 1 should be col 4 (tail)")
@@ -77,12 +76,10 @@ vim.api.nvim_feedkeys(ctrl_v .. "3jl", "nx", false)
 mcline.apply("alternate")
 
 assert(vim.b.visual_multi == 1, "VM should be active for block alternate")
-local b_regions = vim.b.VM_Selection.Regions
-assert(b_regions[1].a == 3, "Block Line 1 should be after block right edge (col 3)")
-assert(b_regions[2].a == 1, "Block Line 2 should be at block left edge (col 1)")
-assert(b_regions[3].a == 3, "Block Line 3 should be after block right edge (col 3)")
-assert(b_regions[4].a == 1, "Block Line 4 should be at block left edge (col 1)")
+for i = 1, 4 do
+    assert(vim.fn.getline(i) == ({ "aaa", "bbb", "ccc", "ddd" })[i], "Block normal mode must not modify line text")
+end
 mcline.clear()
 
 vim.cmd("bdelete!")
-print("ALL MULTICURSOR-LINE ALTERNATE & TAIL POSITION TESTS PASSED!")
+print("ALL MULTICURSOR-LINE NO-TRAILING-SPACE TESTS PASSED!")

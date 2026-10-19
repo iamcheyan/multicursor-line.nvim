@@ -141,7 +141,9 @@ function M.apply(mode, opts)
     local bufnr = vim.api.nvim_get_current_buf()
 
     if b == "vm" then
+        local tail_eol_region_indices = {}
         local line_index = 1
+
         for l = s_line, e_line do
             local line_str = vim.api.nvim_buf_get_lines(bufnr, l - 1, l, true)[1] or ""
             local len = #line_str
@@ -150,30 +152,20 @@ function M.apply(mode, opts)
             if is_tail then
                 if is_block then
                     if (e_col + 1) < len then
-                        -- Position directly after block right edge inside text
+                        -- Position directly after block right edge inside existing line text
                         vim.api.nvim_win_set_cursor(0, { l, e_col + 1 })
                         vim.fn["vm#commands#add_cursor_at_pos"](0)
                     else
-                        -- Position at EOL using VM extra_spaces
+                        -- At or past line end: position on last char in normal mode without modifying buffer
                         vim.api.nvim_win_set_cursor(0, { l, math.max(0, len - 1) })
                         vim.fn["vm#commands#add_cursor_at_pos"](0)
-                        local r_idx = #vim.b.VM_Selection.Regions - 1
-                        vim.cmd(string.format([[
-                            call b:VM_Selection.Edit.extra_spaces.add(b:VM_Selection.Regions[%d])
-                            let b:VM_Selection.Regions[%d].a = b:VM_Selection.Regions[%d].a + 1
-                            let b:VM_Selection.Regions[%d].b = b:VM_Selection.Regions[%d].b + 1
-                        ]], r_idx, r_idx, r_idx, r_idx, r_idx))
+                        table.insert(tail_eol_region_indices, #vim.b.VM_Selection.Regions - 1)
                     end
                 else
-                    -- Linewise tail: place at EOL and add extra space so cursor is truly past line end
+                    -- Linewise tail: position on last char in normal mode (no trailing space added!)
                     vim.api.nvim_win_set_cursor(0, { l, math.max(0, len - 1) })
                     vim.fn["vm#commands#add_cursor_at_pos"](0)
-                    local r_idx = #vim.b.VM_Selection.Regions - 1
-                    vim.cmd(string.format([[
-                        call b:VM_Selection.Edit.extra_spaces.add(b:VM_Selection.Regions[%d])
-                        let b:VM_Selection.Regions[%d].a = b:VM_Selection.Regions[%d].a + 1
-                        let b:VM_Selection.Regions[%d].b = b:VM_Selection.Regions[%d].b + 1
-                    ]], r_idx, r_idx, r_idx, r_idx, r_idx))
+                    table.insert(tail_eol_region_indices, #vim.b.VM_Selection.Regions - 1)
                 end
             else
                 -- Head: position at line start or block left edge
@@ -185,9 +177,17 @@ function M.apply(mode, opts)
             line_index = line_index + 1
         end
 
-        -- Map i, a, c, s so pressing any of them starts insert at the exact target positions
+        -- Map i, a, c, s so pressing any of them starts insert mode at target positions
         local function start_insert()
             M.cleanup_submode(bufnr)
+            -- Only now, at the moment of typing, transition EOL tail cursors to insert mode
+            for _, r_idx in ipairs(tail_eol_region_indices) do
+                vim.cmd(string.format([[
+                    call b:VM_Selection.Edit.extra_spaces.add(b:VM_Selection.Regions[%d])
+                    let b:VM_Selection.Regions[%d].a = b:VM_Selection.Regions[%d].a + 1
+                    let b:VM_Selection.Regions[%d].b = b:VM_Selection.Regions[%d].b + 1
+                ]], r_idx, r_idx, r_idx, r_idx, r_idx))
+            end
             vim.cmd("call b:VM_Selection.Insert.key('i')")
         end
 
