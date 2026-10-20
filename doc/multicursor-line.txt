@@ -40,7 +40,7 @@ Using lazy.nvim: >lua
 
 Default configuration: >lua
     require("multicursor-line").setup({
-        default_mode = "head",      -- "head" | "tail" | "alternate"
+        backend = "native", -- "native" (default) | "vm" | "multicursor"
         alternate_start = "tail",   -- "tail" | "head"
         prefix = "<leader>m",       -- Starter keymap prefix
         dynamic_layer = true,       -- Bind <C-n> and <M-C-n> only during active session

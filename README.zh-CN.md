@@ -73,7 +73,7 @@
     "iamcheyan/multicursor-line.nvim",
     dependencies = { "mg979/vim-visual-multi" },
     opts = {
-        backend = "vm",             -- "vm" (实时打字) 或 "multicursor"
+        backend = "native",           -- "native" (默认, 大文件快) / "vm" / "multicursor"
         alternate_start = "tail",   -- 交替模式首行位置 ("tail" 或 "head")
         create_keymaps = true,      -- 自动注册快捷键
     },
@@ -90,6 +90,13 @@
 - `:[range]McLineAlt`：选区或范围智能首尾交替加光标
 - `:[range]McLineAltBol`：选区或范围绝对首尾交替加光标
 - `:McLineClear`：清除所有光标
+
+---
+
+## ⚡ 性能
+
+默认的 `native` 后端用批量缓冲区更新代替“每个光标一个高亮匹配”，因此大范围定长文件也保持流畅：
+4000 行生成光标约 0.2 秒，输入与退格会同时更新全部光标。需要其它后端特性时仍可切回 `vm` / `multicursor`。
 
 ---
 

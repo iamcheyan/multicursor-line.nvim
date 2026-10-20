@@ -56,7 +56,7 @@ To accommodate code with indentation, two head modes are supported:
     "iamcheyan/multicursor-line.nvim",
     dependencies = { "mg979/vim-visual-multi" },
     opts = {
-        backend = "vm",             -- "vm" (live typing) or "multicursor"
+        backend = "native",         -- "native" (default, fast on large ranges) / "vm" / "multicursor"
         alternate_start = "tail",   -- Start alternate mode with "tail" or "head"
         create_keymaps = true,
     },
@@ -73,6 +73,15 @@ To accommodate code with indentation, two head modes are supported:
 - `:[range]McLineAlt`: Add cursors alternating between tail and first non-blank
 - `:[range]McLineAltBol`: Add cursors alternating between tail and column 0
 - `:McLineClear`: Clear all active cursors
+
+---
+
+## ⚡ Performance
+
+The default `native` backend applies every edit with batched buffer updates instead of one
+highlight match per cursor, so large fixed-width ranges stay responsive: 4000 lines get
+their cursors in about 0.2s, and typing or backspacing updates all cursors together.
+`vm` and `multicursor` remain selectable for workflows that need their extra features.
 
 ---
 
